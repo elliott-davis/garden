@@ -1,0 +1,38 @@
+kind: Project
+name: terraform-gke
+defaultEnvironment: remote
+environments:
+  - name: local
+    providers:
+      - name: local-kubernetes
+  - name: remote
+    providers:
+      - name: terraform
+        # You can either uncomment the following and replace with your own values, or provide these values
+        # in a terraform.tfvars file.
+        #
+        # variables:
+        #   gcp-project-id: garden-terraform-gke-example
+        #   gcp-credentials-file: account.json
+        #   gcp-region: eu-west1
+        #   cluster-hostname: mydomain.com
+        #   # for generating Let's Encrypt cert
+        #   acme-email-address: nobody@mydomain.com
+      - name: kubernetes
+        cluster:
+          server: https://${providers.terraform.outputs.gke_master_ip}
+          certificate-authority-data: ${providers.terraform.outputs.gke_cluster_ca_certificate}
+        user:
+          client-certificate-data: ${providers.terraform.outputs.gke_client_certificate}
+          client-key-data: ${providers.terraform.outputs.gke_client_key}
+        defaultHostname: ${providers.terraform.outputs.gke_hostname}
+        forceSsl: true
+        tlsCertificates:
+        - name: garden-example-tls
+          # This is provisioned and created via Terraform
+          secretRef:
+            name: garden-example-tls
+            namespace: default
+        deploymentRegistry:
+          hostname: eu.gcr.io
+          namespace: ${providers.terraform.outputs.gcp_project_id}

@@ -5,4 +5,5 @@ name: api-image
 hotReload:
   sync:
   - source: "*"
-    target: /app
+    target: /
+include: [Dockerfile]

@@ -270,6 +270,11 @@ export class BinaryCmd extends Library {
     return res.stdout
   }
 
+  async json(params: ExecParams) {
+    const out = await this.stdout(params)
+    return JSON.parse(out)
+  }
+
   async spawn({ args, cwd, env, log }: ExecParams) {
     const path = await this.getPath(log)
     return crossSpawn(path, args || [], { cwd: cwd || dirname(path), env })

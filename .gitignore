@@ -18,7 +18,12 @@ node_modules
 # Runtime files
 .garden
 tmp/
+<<<<<<< HEAD
 metadata.json
+=======
+*.tfstate
+.terraform
+>>>>>>> feat: add terraform provider and example with GKE setup (WIP)
 
 # TS cache on the CI
 ts-node-*
