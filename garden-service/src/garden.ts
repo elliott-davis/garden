@@ -8,7 +8,7 @@
 
 import Bluebird = require("bluebird")
 import { parse, relative, resolve, sep } from "path"
-import { flatten, isString, cloneDeep, sortBy, set, zip } from "lodash"
+import { flatten, isString, cloneDeep, sortBy, set, fromPairs, keyBy } from "lodash"
 const AsyncLock = require("async-lock")
 
 import { TreeCache } from "./cache"
@@ -22,7 +22,7 @@ import { VcsHandler, ModuleVersion } from "./vcs/vcs"
 import { GitHandler } from "./vcs/git"
 import { BuildDir } from "./build-dir"
 import { ConfigGraph } from "./config-graph"
-import { TaskGraph, TaskResults } from "./task-graph"
+import { TaskGraph, TaskResults, ProcessTasksOpts } from "./task-graph"
 import { getLogger } from "./logger/logger"
 import { PluginActions, PluginFactory, GardenPlugin } from "./types/plugin/plugin"
 import { joiIdentifier, validate, PrimitiveMap, validateWithPath } from "./config/common"
@@ -41,7 +41,7 @@ import { LogEntry } from "./logger/log-entry"
 import { EventBus } from "./events"
 import { Watcher } from "./watch"
 import { getIgnorer, Ignorer, getModulesPathsFromPath, getConfigFilePath, getWorkingCopyId } from "./util/fs"
-import { Provider, ProviderConfig, getProviderDependencies } from "./config/provider"
+import { Provider, ProviderConfig, getProviderDependencies, defaultProvider } from "./config/provider"
 import { ResolveProviderTask } from "./tasks/resolve-provider"
 import { ActionHelper } from "./actions"
 import { DependencyGraph, detectCycles, cyclesToString } from "./util/validate-dependencies"
@@ -80,8 +80,6 @@ interface ModuleConfigResolveOpts extends ContextResolveOpts {
   configContext?: ModuleConfigContext
 }
 
-const asyncLock = new AsyncLock()
-
 export interface GardenParams {
   buildDir: BuildDir,
   environmentName: string,
@@ -99,7 +97,7 @@ export interface GardenParams {
 
 export class Garden {
   public readonly log: LogEntry
-  private readonly loadedPlugins: { [key: string]: GardenPlugin }
+  private loadedPlugins: { [key: string]: GardenPlugin }
   private moduleConfigs: ModuleConfigMap
   private pluginModuleConfigs: ModuleConfig[]
   private resolvedProviders: Provider[]
@@ -107,6 +105,7 @@ export class Garden {
   private readonly registeredPlugins: { [key: string]: PluginFactory }
   private readonly taskGraph: TaskGraph
   private watcher: Watcher
+  private asyncLock: any
 
   public readonly configStore: ConfigStore
   public readonly globalConfigStore: GlobalConfigStore
@@ -139,6 +138,7 @@ export class Garden {
     this.providerConfigs = params.providerConfigs
     this.variables = params.variables
     this.workingCopyId = params.workingCopyId
+    this.asyncLock = new AsyncLock()
 
     // make sure we're on a supported platform
     const currentPlatform = platform()
@@ -161,7 +161,6 @@ export class Garden {
     this.cache = new TreeCache()
 
     this.moduleConfigs = {}
-    this.loadedPlugins = {}
     this.pluginModuleConfigs = []
     this.registeredPlugins = {}
 
@@ -236,16 +235,16 @@ export class Garden {
     this.watcher && this.watcher.stop()
   }
 
-  getPluginContext(providerName: string) {
-    return createPluginContext(this, providerName)
+  getPluginContext(provider: Provider) {
+    return createPluginContext(this, provider)
   }
 
   async clearBuilds() {
     return this.buildDir.clear()
   }
 
-  async processTasks(tasks: BaseTask[]): Promise<TaskResults> {
-    return this.taskGraph.process(tasks)
+  async processTasks(tasks: BaseTask[], opts?: ProcessTasksOpts): Promise<TaskResults> {
+    return this.taskGraph.process(tasks, opts)
   }
 
   /**
@@ -320,10 +319,6 @@ export class Garden {
   }
 
   private async loadPlugin(pluginName: string) {
-    if (this.loadedPlugins[pluginName]) {
-      return this.loadedPlugins[pluginName]
-    }
-
     this.log.silly(`Loading plugin ${pluginName}`)
     const factory = this.registeredPlugins[pluginName]
 
@@ -350,15 +345,14 @@ export class Garden {
 
     plugin = validate(plugin, pluginSchema, { context: `plugin "${pluginName}"` })
 
-    this.loadedPlugins[pluginName] = plugin
-
     this.log.silly(`Done loading plugin ${pluginName}`)
 
     return plugin
   }
 
-  getPlugin(pluginName: string) {
-    const plugin = this.loadedPlugins[pluginName]
+  async getPlugin(pluginName: string) {
+    const plugins = await this.getPlugins()
+    const plugin = plugins[pluginName]
 
     if (!plugin) {
       throw new PluginError(`Could not find plugin '${pluginName}'. Are you missing a provider configuration?`, {
@@ -370,23 +364,64 @@ export class Garden {
     return plugin
   }
 
+  async getPlugins() {
+    !this.loadedPlugins && await this.asyncLock.acquire("load-plugins", async () => {
+      if (this.loadedPlugins) {
+        return
+      }
+
+      this.log.silly(`Loading plugins`)
+      const rawConfigs = this.getRawProviderConfigs()
+      const plugins = {}
+
+      await Bluebird.each(rawConfigs, async (config) => {
+        plugins[config.name] = await this.loadPlugin(config.name)
+      })
+
+      this.loadedPlugins = plugins
+      this.log.silly(`Loaded plugins: ${Object.keys(plugins).join(", ")}`)
+    })
+
+    return this.loadedPlugins
+  }
+
   getRawProviderConfigs() {
     return this.providerConfigs
   }
 
-  async resolveProviders(): Promise<Provider[]> {
-    await asyncLock.acquire("resolve-providers", async () => {
+  async resolveProvider(name: string) {
+    if (name === "_default") {
+      return defaultProvider
+    }
+
+    const providers = await this.resolveProviders()
+    const provider = findByName(providers, name)
+
+    if (!provider) {
+      throw new PluginError(`Could not find provider '${name}'`, { name, providers })
+    }
+
+    return provider
+  }
+
+  async resolveProviders(forceInit = false): Promise<Provider[]> {
+    !this.resolvedProviders && await this.asyncLock.acquire("resolve-providers", async () => {
       if (this.resolvedProviders) {
         return
       }
 
+      this.log.silly(`Resolving providers`)
+      const log = this.log.info({ section: "providers", msg: "Getting status...", status: "active" })
+
       const rawConfigs = this.getRawProviderConfigs()
-      const plugins = await Bluebird.map(rawConfigs, async (config) => this.loadPlugin(config.name))
+      const configsByName = keyBy(rawConfigs, "name")
+      const plugins = Object.entries(await this.getPlugins())
 
       // Detect circular deps here
       const pluginGraph: DependencyGraph = {}
 
-      await Bluebird.map(zip(plugins, rawConfigs), async ([plugin, config]) => {
+      await Bluebird.map(plugins, async ([name, plugin]) => {
+        const config = configsByName[name]
         for (const dep of await getProviderDependencies(plugin!, config!)) {
           set(pluginGraph, [config!.name, dep], { distance: 1, next: dep })
         }
@@ -403,7 +438,7 @@ export class Garden {
         )
       }
 
-      const tasks = rawConfigs.map((config, i) => {
+      const tasks = plugins.map(([name, plugin]) => {
         // TODO: actually resolve version, based on the VCS version of the plugin and its dependencies
         const version = {
           versionString: getPackageVersion(),
@@ -413,17 +448,20 @@ export class Garden {
           files: [],
         }
 
-        const plugin = plugins[i]
+        const config = configsByName[name]
 
         return new ResolveProviderTask({
           garden: this,
-          log: this.log,
+          log,
           plugin,
           config,
           version,
+          forceInit,
         })
       })
-      const taskResults = await this.processTasks(tasks)
+
+      // Process as many providers in parallel as possible
+      const taskResults = await this.processTasks(tasks, { concurrencyLimit: plugins.length })
 
       const failed = Object.values(taskResults).filter(r => !!r.error)
 
@@ -435,24 +473,37 @@ export class Garden {
         )
       }
 
-      this.resolvedProviders = Object.values(taskResults).map(result => result.output)
+      const providers: Provider[] = Object.values(taskResults).map(result => result.output)
 
-      await Bluebird.map(this.resolvedProviders, async (provider) =>
+      await Bluebird.map(providers, async (provider) =>
         Bluebird.map(provider.moduleConfigs, async (moduleConfig) => {
           // Make sure module and all nested entities are scoped to the plugin
           moduleConfig.plugin = provider.name
           return this.addModule(moduleConfig)
         }),
       )
+
+      this.resolvedProviders = providers
+
+      log.setSuccess()
+      this.log.silly(`Resolved providers: ${providers.map(p => p.name).join(", ")}`)
     })
 
     return this.resolvedProviders
   }
 
+  /**
+   * Returns the reported status from all configured providers.
+   */
+  async getEnvironmentStatus() {
+    const providers = await this.resolveProviders()
+    return fromPairs(providers.map(p => [p.name, p.status]))
+  }
+
   async getActionHelper() {
     if (!this.actionHelper) {
-      const providers = await this.resolveProviders()
-      this.actionHelper = new ActionHelper(this, providers)
+      const plugins = await this.getPlugins()
+      this.actionHelper = new ActionHelper(this, plugins)
     }
 
     return this.actionHelper
@@ -479,13 +530,14 @@ export class Garden {
    */
   async resolveModuleConfigs(keys?: string[], opts: ModuleConfigResolveOpts = {}): Promise<ModuleConfig[]> {
     const actions = await this.getActionHelper()
+    const providers = await this.resolveProviders()
     const configs = await this.getRawModuleConfigs(keys)
 
     if (!opts.configContext) {
       opts.configContext = new ModuleConfigContext(
         this,
         this.environmentName,
-        await this.resolveProviders(),
+        providers,
         this.variables,
         Object.values(this.moduleConfigs),
       )
@@ -537,7 +589,8 @@ export class Garden {
         moduleType: config.type,
       })
 
-      const ctx = await this.getPluginContext(configureHandler["pluginName"])
+      const provider = await this.resolveProvider(configureHandler["pluginName"])
+      const ctx = await this.getPluginContext(provider)
       config = await configureHandler({ ctx, moduleConfig: config, log: this.log })
 
       if (config.plugin) {
@@ -624,7 +677,7 @@ export class Garden {
     Scans the project root for modules and adds them to the context.
    */
   async scanModules(force = false) {
-    return asyncLock.acquire("scan-modules", async () => {
+    return this.asyncLock.acquire("scan-modules", async () => {
       if (this.modulesScanned && !force) {
         return
       }

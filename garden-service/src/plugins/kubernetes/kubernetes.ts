@@ -25,6 +25,7 @@ import { ConfigurationError } from "../../exceptions"
 import { cleanupClusterRegistry } from "./commands/cleanup-cluster-registry"
 import { clusterInit } from "./commands/cluster-init"
 import { uninstallGardenServices } from "./commands/uninstall-garden-services"
+import { joi, joiIdentifier } from "../../config/common"
 
 export const name = "kubernetes"
 
@@ -87,9 +88,20 @@ export async function debugInfo({ ctx, log }: GetDebugInfoParams): Promise<Debug
   }
 }
 
+const outputsSchema = joi.object()
+  .keys({
+    "app-namespace": joiIdentifier()
+      .required()
+      .description("The primary namespace used for resource deployments."),
+    "metadata-namespace": joiIdentifier()
+      .required()
+      .description("The namespace used for Garden metadata."),
+  })
+
 export function gardenPlugin(): GardenPlugin {
   return {
     configSchema,
+    outputsSchema,
     commands: [
       cleanupClusterRegistry,
       clusterInit,

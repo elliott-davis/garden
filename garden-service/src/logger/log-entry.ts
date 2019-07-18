@@ -15,6 +15,7 @@ import { getChildEntries, findParentEntry } from "./util"
 import { GardenError } from "../exceptions"
 import { Omit } from "../util/util"
 import { Logger } from "./logger"
+import { inspect } from "util"
 
 export type EmojiName = keyof typeof nodeEmoji.emoji
 export type LogSymbol = keyof typeof logSymbols | "empty"
@@ -196,7 +197,7 @@ export class LogEntry extends LogNode {
   }
 
   inspect() {
-    console.log(JSON.stringify({
+    console.log(inspect({
       ...this.opts,
       level: this.level,
       children: this.children,
