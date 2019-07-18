@@ -16,10 +16,10 @@ import { Module } from "../../types/module"
 import { ServiceStatus, ServiceIngress, Service } from "../../types/service"
 import {
   ExecModuleSpec,
-  execModuleSpecSchema,
   ExecTestSpec,
   testExecModule,
   getExecModuleBuildStatus,
+  execTestSchema,
 } from "../exec"
 import { KubernetesProvider } from "../kubernetes/config"
 import { getNamespace, getAppNamespace } from "../kubernetes/namespace"
@@ -45,6 +45,7 @@ import { DEFAULT_API_VERSION, STATIC_DIR } from "../../constants"
 import { ExecModuleConfig } from "../exec"
 import { ConfigureProviderParams, ConfigureProviderResult } from "../../types/plugin/provider/configureProvider"
 import { KubernetesDeployment } from "../kubernetes/types"
+import { baseModuleSpecSchema } from "../../config/module"
 
 const systemDir = join(STATIC_DIR, "openfaas", "system")
 export const stackFilename = "stack.yml"
@@ -55,7 +56,7 @@ export interface OpenFaasModuleSpec extends ExecModuleSpec {
   lang: string
 }
 
-export const openfaasModuleSpecSchema = execModuleSpecSchema
+export const openfaasModuleSpecSchema = baseModuleSpecSchema
   .keys({
     dependencies: joiArray(joi.string())
       .description("The names of services/functions that this function depends on at runtime."),
@@ -68,6 +69,8 @@ export const openfaasModuleSpecSchema = execModuleSpecSchema
     lang: joi.string()
       .required()
       .description("The OpenFaaS language template to use to build this function."),
+    tests: joiArray(execTestSchema)
+      .description("A list of tests to run in the module."),
   })
   .unknown(false)
   .description("The module specification for an OpenFaaS module.")
@@ -168,7 +171,7 @@ const templateModuleConfig: ExecModuleConfig = {
 }
 
 async function configureProvider(
-  { log, config, projectName, dependencies, configStore }: ConfigureProviderParams<OpenFaasConfig>,
+  { log, config, projectName, dependencies }: ConfigureProviderParams<OpenFaasConfig>,
 ): Promise<ConfigureProviderResult> {
   const k8sProvider = getK8sProvider(dependencies)
 
@@ -184,7 +187,6 @@ async function configureProvider(
   }
 
   const namespace = await getNamespace({
-    configStore,
     log,
     provider: k8sProvider,
     projectName,
@@ -470,7 +472,6 @@ function getServicePath(config: OpenFaasModuleConfig) {
 async function getInternalGatewayUrl(ctx: PluginContext<OpenFaasConfig>, log: LogEntry) {
   const k8sProvider = getK8sProvider(ctx.provider.dependencies)
   const namespace = await getNamespace({
-    configStore: ctx.configStore,
     log,
     projectName: ctx.projectName,
     provider: k8sProvider,

@@ -15,6 +15,7 @@ import { getChildEntries, findParentEntry, sanitizeObject } from "./util"
 import { GardenError } from "../exceptions"
 import { Omit } from "../util/util"
 import { Logger } from "./logger"
+import { inspect } from "util"
 
 export type EmojiName = keyof typeof nodeEmoji.emoji
 export type LogSymbol = keyof typeof logSymbols | "empty"
